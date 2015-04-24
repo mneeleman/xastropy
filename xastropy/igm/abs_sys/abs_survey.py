@@ -85,22 +85,7 @@ class Absline_Survey(object):
 
     # Get attributes
     def __getattr__(self, k):
-        try:
-            lst = [getattr(abs_sys,k) for abs_sys in self.abs_sys]
-        except ValueError:
-            raise ValueError
-
-        # Convert to array?
-        if isinstance(lst[0],u.quantity.Quantity):
-            #Mask and create an array
-            unit = lst[0].unit
-            newlst= []
-            for ii in range(len(self.mask)):
-                if self.mask[ii]: 
-                    newlst.append(lst[ii].value)
-            return np.array(newlst) * unit
-        else:
-            return np.array(lst)[self.mask]
+        return np.array( [getattr(abs_sys,k) for abs_sys in self.abs_sys] )[self.mask]
 
     # Get ions
     def fill_ions(self): # This may be overloaded!
@@ -108,7 +93,7 @@ class Absline_Survey(object):
         Loop on systems to fill in ions
         '''
         for abs_sys in self.abs_sys:
-            abs_sys.get_ions()
+            abs_sys.get_ions(self.tree+abs_sys.clm_fil)
 
     # Get ions
     def ions(self,iZion, skip_null=False):

@@ -12,38 +12,61 @@
 """
 from __future__ import print_function, absolute_import, division, unicode_literals
 
-import barak
 import xastropy
 import numpy as np
 import matplotlib.pyplot as plt
 import pdb
 from astropy import constants as const
 
+import xastropy.atomic as xatom
+from xastropy.xutils import xdebug as xdb
 
+#class Spectral_Line(object):
 #def pixminmax(spec, zabs, wrest, vmnx):
+#def x_contifit(specfil, outfil=None, savfil=None, redshift=0., divmult=1, forest_divmult=1):
 
+# Class for Ionic columns of a given line
+class Spectral_Line(object):
+    """Class for analysis of a given spectral line
 
-#### ###############################
-#  Grabs spectrum pixels in a velocity window
-#
-def pixminmax(spec, zabs, wrest, vmnx):
-    """Pixels in velocity range
+    Attributes:
+        wrest: float
+          Rest wavelength of the spectral feature
     """
 
-    # Constants
-    spl = const.c.to('km/s').value 
+    # Initialize with wavelength
+    def __init__(self, wrest, clm_file=None):
+        self.wrest = wrest
+        self.atomic = {} # Atomic Data
+        self.analy = {} # Analysis inputs (from .clm file or AbsID)
+        self.measure = {} # Measured quantities (e.g. column, EW, centroid)
+        # Fill
+        self.fill()
 
-    # Create VELO
-    spec.velo = (spec.dispersion-wrest*(1+zabs))*spl/( wrest*(1+zabs) )
+    # Fill Analy
+    def fill(self):
+        import xastropy.spec.abs_line as xspa
+        # Data
+        self.atomic = xspa.abs_line_data(self.wrest)
+        #
+        self.analy['VLIM'] = [0., 0.] # km/s
+        self.analy['FLG_ANLY'] = 1 # Analyze
+        self.analy['FLG_EYE'] = 0
+        self.analy['FLG_LIMIT'] = 0 # No limit
+        self.analy['DATFIL'] = '' 
+        self.analy['IONNM'] = self.atomic['name']
 
-    # Locate the values
-    pixmin = np.argmin( np.fabs( spec.velo-vmnx[0] ) )
-    pixmax = np.argmin( np.fabs( spec.velo-vmnx[1] ) )
-    #pdb.set_trace()
+    # Output
+    def __repr__(self):
+        return ('[{:s}: wrest={:g}]'.format(
+                self.__class__.__name__, self.wrest))
 
-    # Return
-    return range(pixmin,pixmax+1)
-
+#### ###############################
+def pixminmax(*args):
+    ''' Soon to be deprecated..
+    Use  Spectrum1D.pix_minmax()
+    '''
+    xdb.set_trace()
 
 #### ###############################
 #  Calls plotvel (Crighton)
@@ -72,6 +95,7 @@ def velplt(specfil):
     # Call
     pspv.main([specfil, 'f26='+f26_fil, 'transitions='+transfil])
 
+'''
 #### ###############################
 #  Calls Barak routines to fit the continuum
 #    Stolen from N. Tejos by JXP
@@ -138,3 +162,4 @@ def x_contifit(specfil, outfil=None, savfil=None, redshift=0., divmult=1, forest
     ## Output
     # Data file with continuum
 
+'''

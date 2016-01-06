@@ -1,12 +1,13 @@
 import abund
 import atomic
+import casbah
 import files
 import igm
 import obs
 import phot
 import plotting
 import spec
-import tests
+import stats
 import xguis
 import xutils
 import PH136

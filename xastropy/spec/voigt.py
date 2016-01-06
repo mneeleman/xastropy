@@ -16,6 +16,11 @@ from __future__ import print_function, absolute_import, division, unicode_litera
 import numpy as np
 import sys
 import os
+
+from astropy import units as u
+from astropy.units import Unit
+from astropy import constants as const
+
 from xastropy.xutils import xdebug as xdb
 
 from xastropy.spec import abs_line
@@ -63,6 +68,7 @@ def voigt_model(spec, line, Npix=None, flg_ret=1):
     """Generates a Voigt model from a line or list of lines
 
     Parameters:
+    ------------
         spec: wave array or Spectrum
         line: Abs_Line, List of Abs_line, or array of parameters
         flg_ret : int (1)  Byte-wise Flag for return
@@ -75,22 +81,24 @@ def voigt_model(spec, line, Npix=None, flg_ret=1):
     JXP 01 Nov 2014
     """
     # Imports
-    #from barak import spec as bs
-    from barak import convolve as bc
     import copy
-    from specutils.spectrum1d import Spectrum1D
+    from linetools.spectra.utils import XSpectrum1D
+    from astropy.nddata import StdDevUncertainty
+    from xastropy.spec.lines_utils import AbsLine
 
     # Spectrum input
     if isinstance(spec,np.ndarray):  # Standard wavelength array
-        vmodel = Spectrum1D.from_array(spec, np.zeros(len(spec)))
+        vmodel = XSpectrum1D.from_array(spec, np.ones(len(spec)), 
+        	uncertainty=StdDevUncertainty(np.zeros(len(spec))))
     elif isinstance(spec,Spectrum1D):
         vmodel = copy.deepcopy(spec)
     else:
         raise ValueError('voigt_model: Unknown input')
+    #xdb.set_trace()
         
     # Line input
-    if isinstance(line,abs_line.Abs_Line):  # Single line as a Abs_Line Class
-        par = np.zeros(6)
+    if isinstance(line,AbsLine):  # Single line as a Abs_Line Class
+        par = [0*i for i in range(6)] # Dummy list
         par[0] = line.attrib['N']
         par[1] = line.z
         par[2] = line.attrib['b']
@@ -98,11 +106,10 @@ def voigt_model(spec, line, Npix=None, flg_ret=1):
         par[4] = line.atomic['fval']
         par[5] = line.atomic['gamma']
     elif isinstance(line,list):
-        if isinstance(line[0],abs_line.Abs_Line):  # List of Abs_Line
+        if isinstance(line[0],AbsLine):  # List of Abs_Line
             tau = np.zeros(len(vmodel.flux))
             for iline in line:
                 tau += voigt_model(vmodel.dispersion, iline, Npix=None, flg_ret=2) 
-                #xdb.set_trace()
         else:
             par = line  # Single line as a vector
     else: 
@@ -110,23 +117,40 @@ def voigt_model(spec, line, Npix=None, flg_ret=1):
 
     # tau
     if 'tau' not in locals():
-        cold = 10.0**par[0]
+        #xdb.set_trace()
+        cold = 10.0**par[0] / u.cm / u.cm
         zp1=par[1]+1.0
-        wv=par[3]*1.0e-8
-        bl=par[2]*wv/2.99792458E5
-        a=par[5]*wv*wv/(3.76730313461770655E11*bl)
-        cns=wv*wv*par[4]/(bl*2.002134602291006E12)
+
+        wv=par[3].to(u.cm) #*1.0e-8
+        nujk = (const.c / wv).to(u.Hz)
+        dnu = ((par[2]*u.km/u.s) / wv).to('Hz')
+        avoigt = ((par[5]/u.s)/( 4 * np.pi * dnu)).to(u.dimensionless_unscaled)
+
+        uvoigt = ( ((const.c / (vmodel.dispersion/zp1)) - nujk) / dnu).to(u.dimensionless_unscaled)
+        '''
+        wv=par[3].to(u.cm) #*1.0e-8
+        bl=((par[2]*u.km/u.s)*wv/const.c).to(u.cm) # 2.99792458E5
+        a= ((par[5]/u.s)*wv*wv/( 4 * np.pi * const.c.to('cm/s') * bl)).to(u.dimensionless_unscaled)
+        cns=wv*wv*par[4]/(bl*2.002134602291006E12) * u.cm
 
         # Converting to Voigt units
         cne=cold*cns
-        ww=(vmodel.dispersion*1.0e-8)/zp1
+        ww=(vmodel.dispersion.to('cm'))/zp1
         v=wv*ww*((1.0/ww)-(1.0/wv))/bl
+        '''
 
         # Voigt
-        tau = cne * voigtking(v,a)
+        cne = 0.01497 * cold * par[4] * u.cm * u.cm * u.Hz
+        tau = cne * voigtking(uvoigt,avoigt) / (np.sqrt(np.pi) * dnu)
 
     # Flux
-    vmodel.flux = np.exp(-1.0*tau)
+    if vmodel.unit is None:
+        try:
+            vmodel.flux = (np.exp(-1.0*tau)).value
+        except AttributeError:
+            vmodel.flux = np.exp(-1.0*tau)
+    else:
+        vmodel.flux = np.exp(-1.0*tau).to(vmodel.unit)
 
     # Convolve
     if Npix is not None:
@@ -156,10 +180,11 @@ def voigt_model(spec, line, Npix=None, flg_ret=1):
 # ##################################################
 if __name__ == '__main__':
     from matplotlib import pyplot as plt
-    from barak import spec as bs
+    from xastropy.spec import lines_utils as xsl
+    from xastropy.spec.lines_utils import AbsLine
 
     flg_test = 0
-    flg_test += 2**0
+    #flg_test += 2**0
     flg_test += 2**1
     flg_test += 2**2
     flg_test += 2**3
@@ -167,10 +192,11 @@ if __name__ == '__main__':
     flg_test += 2**5
 
     wave = np.linspace(1260.0,1285.0,10000)
+    wave = wave * u.AA
 
     # Single line (Lya)
     zabs = 0.05
-    line = abs_line.Abs_Line(1215.6701)
+    line = AbsLine(1215.6701*u.AA)
     line.z = zabs
     line.attrib['N'] = 20.0
     line.attrib['b'] = 50.0
@@ -178,12 +204,12 @@ if __name__ == '__main__':
     if flg_test % 2 == 1:
         print('voigt: Single line test')
         vmodel = voigt_model(wave, line, Npix=None)  # No smoothing
-        vmodel.qck_plot()
+        xdb.xplot(vmodel.dispersion, vmodel.flux)
 
     # Two lines (Lya)
     line.attrib['N'] = 13.0
     line.attrib['b'] = 20.0
-    line2 = abs_line.Abs_Line(1215.6701)
+    line2 = AbsLine(1215.6701*u.AA)
     line2.z = zabs + 5e-3
     line2.attrib['N'] = 13.5
     line2.attrib['b'] = 20.0
@@ -192,10 +218,10 @@ if __name__ == '__main__':
         for item in lines: print('z = %g' % item.z)
         vmodel = voigt_model(wave, lines, Npix=None)  # No smoothing
         print('voigt: Multiple lines test')
-        vmodel.qck_plot()
+        xdb.xplot(vmodel.dispersion, vmodel.flux)
 
     # List (Lya)
-    wrest=1215.6701
+    wrest=1215.6701*u.AA
     fval=0.416
     gamma=6.265E8
 
@@ -206,7 +232,7 @@ if __name__ == '__main__':
     if flg_test % 8 >= 4:
         print('voigt: Array test')
         vmodel = voigt_model(wave, line, Npix=None)  # No smoothing
-        vmodel.qck_plot()
+        xdb.xplot(vmodel.dispersion, vmodel.flux)
 
     # Ionic
     #plt.clf()
@@ -216,16 +242,16 @@ if __name__ == '__main__':
     doppler = 3.0
     fval = 1.669
     gamma = 2.5E9
-    wrest = 1206.5 # SiIII
+    wrest = 1206.5*u.AA # SiIII
     line = [coldens,zabs,doppler,wrest,fval,gamma]
 
     plt.clf()
     if flg_test % 16 >= 8:
         vmodel = voigt_model(wave, line, Npix=None)  # No smoothing
-        vmodel.qck_plot(show=False, drawstyle='steps-mid')
+        xdb.xplot(vmodel.dispersion, vmodel.flux, drawstyle='steps-mid')
         vmodel2 = voigt_model(wave, line, Npix=4.)  # Smoothing
         print('voigt: Smooth test')
-        vmodel2.qck_plot()
+        xdb.xplot(vmodel.dispersion, vmodel.flux)
 
     # Test pass back
     if flg_test % 32 >= 16:

@@ -1,7 +1,8 @@
 """
+DEPRECATED
 #;+ 
 #; NAME:
-#; readwrite
+#; io  (used to be readwrite)
 #;    Version 1.0
 #;
 #; PURPOSE:
@@ -15,62 +16,76 @@ from __future__ import print_function, absolute_import, division, unicode_litera
 
 # Import libraries
 import numpy as np
-from astropy.io import fits
-from astropy.io import ascii 
-from astropy.nddata import StdDevUncertainty
 import os
 
+from astropy.io import fits, ascii
+from astropy.nddata import StdDevUncertainty
+from astropy import units as u
+from astropy.table import Table
+from astropy.io.fits.fitsrec import FITS_rec
+from astropy.io.fits.hdu.table import BinTableHDU
+
 from specutils.io import read_fits as spec_read_fits
-from specutils.spectrum1d import Spectrum1D
 
 from xastropy.xutils import xdebug as xdb
+from xastropy.spec.utils import XSpectrum1D
 
 #### ###############################
-#  Read Spectrum from FITS file
-#  Return Barak-favored Table
-#  from xastropy.spec import readwrite as xsr
-#  sp = xsr.readspec('SDSSJ114435.54+095921.7_F.fits',outfil='SDSSJ114435.54+095921.7.fits')
+#  Generate Spectrum1D from FITS file
 #
 def readspec(specfil, inflg=None, efil=None, outfil=None, show_plot=0,
-             use_barak=False, verbose=False):
-    ''' Deprecated already!
+             use_barak=False, verbose=False, flux_tags=None, sig_tags=None, multi_ivar=False):
+    ''' 
+    specfil: string or Table
+    multi_ivar: Bool (False)
+      BOSS format of  flux, ivar, log10(wave) in multi-extension FITS
     '''
-    from xastropy.spec import readwrite as rw
     from xastropy.files import general as xfg
     #from xastropy.plotting import x_guis as xpxg
     from astropy.table import Table
     from astropy.table import Column
-    #reload(bs)
+
+    raise ValueError('USE LINETOOLS.spectra.io INSTEAD!!')
 
     # Initialize
     dat = None
-    chk = None
     if inflg == None:
         inflg = 0
 
-    # Read header
-    datfil = xfg.chk_for_gz(specfil,chk=chk)
-    if chk == 0:
-        print('xastropy.spec.readwrite: File does not exist ', specfil)
-        return -1
-    hdulist = fits.open(os.path.expanduser(datfil))
+    # Check specfil type
+    if type(specfil) is Table:
+        datfil = 'None'
+        # Dummy hdulist
+        hdulist = [fits.PrimaryHDU(), specfil]
+    else:
+        # Read header
+        datfil,chk = xfg.chk_for_gz(specfil)
+        if chk == 0:
+            print('xastropy.spec.readwrite: File does not exist ', specfil)
+            return -1
+        hdulist = fits.open(os.path.expanduser(datfil))
+
+    head0 = hdulist[0].header
 
     ## #################
     # Binary FITS table?
-    if hdulist[0].header['NAXIS'] == 0:
+    if head0['NAXIS'] == 0:
         # Flux 
-        flux_tags = ['SPEC','FLUX','FLAM','FX']
-        fx, fx_tag = rw.get_table_column(flux_tags, hdulist)
-        if fx == None:
+        if flux_tags is None:
+            flux_tags = ['SPEC', 'FLUX','FLAM','FX', 'FLUXSTIS', 'FLUX_OPT', 'fl']
+        fx, fx_tag = get_table_column(flux_tags, hdulist)
+        #xdb.set_trace()
+        if fx is None:
             print('spec.readwrite: Binary FITS Table but no Flux tag')
             return
         # Error
-        sig_tags = ['ERROR','ERR','SIGMA_FLUX','FLAM_SIG']
-        sig, sig_tag = rw.get_table_column(sig_tags, hdulist)
-        if sig == None:
-            ivar_tags = ['IVAR']
-            ivar, ivar_tag = rw.get_table_column(ivar_tags, hdulist)
-            if ivar == None:
+        if sig_tags is None:
+            sig_tags = ['ERROR','ERR','SIGMA_FLUX','FLAM_SIG', 'SIGMA_UP', 'ERRSTIS', 'FLUXERR', 'er']
+        sig, sig_tag = get_table_column(sig_tags, hdulist)
+        if sig is None:
+            ivar_tags = ['IVAR', 'IVAR_OPT']
+            ivar, ivar_tag = get_table_column(ivar_tags, hdulist)
+            if ivar is None:
                 print('spec.readwrite: Binary FITS Table but no error tags')
                 return
             else: 
@@ -78,31 +93,44 @@ def readspec(specfil, inflg=None, efil=None, outfil=None, show_plot=0,
                 gdi = np.where( ivar > 0.)[0]
                 sig[gdi] = np.sqrt(1./ivar[gdi])
         # Wavelength
-        wave_tags = ['WAVE','WAVELENGTH','LAMBDA','LOGLAM']
-        wave, wave_tag = rw.get_table_column(wave_tags, hdulist)
+        wave_tags = ['WAVE','WAVELENGTH','LAMBDA','LOGLAM', 'WAVESTIS', 'WAVE_OPT', 'wa']
+        wave, wave_tag = get_table_column(wave_tags, hdulist)
         if wave_tag == 'LOGLAM':
             wave = 10.**wave
-        if wave == None:
+        if wave is None:
             print('spec.readwrite: Binary FITS Table but no wavelength tag')
             return
-    elif hdulist[0].header['NAXIS'] == 1: # Data in the zero extension
-        # Look for wavelength info
-        if 'CRVAL1' in hdulist[0].header.keys():
+    elif head0['NAXIS'] == 1: # Data in the zero extension
+        # How many entries?
+        if len(hdulist) == 1: # Old school (one file per flux, error)
             # Error
             if efil == None:
                 ipos = max(specfil.find('F.fits'),specfil.find('f.fits'))
                 if ipos < 0: # No error array
-                    sig = np.zeros(fx.size)
+                    efil = None
+                    #sig = np.zeros(fx.size)
                 else:
                     if specfil.find('F.fits') > 0:
-                        efil = xfg.chk_for_gz(specfil[0:ipos]+'E.fits')
+                        efil,chk = xfg.chk_for_gz(specfil[0:ipos]+'E.fits')
                     else:
-                        efil = xfg.chk_for_gz(specfil[0:ipos]+'e.fits')
+                        efil,chk = xfg.chk_for_gz(specfil[0:ipos]+'e.fits')
                 if efil != None:
                     efil=os.path.expanduser(efil)
-
             # Generate Spectrum1D
-            spec1d = spec_read_fits.read_fits_spectrum1d(os.path.expanduser(datfil), efil=efil)
+            spec1d = spec_read_fits.read_fits_spectrum1d(os.path.expanduser(datfil),
+                                                         dispersion_unit='AA',
+                                                         efil=efil)
+            xspec1d = XSpectrum1D.from_spec1d(spec1d)
+
+            #spec1d = spec_read_fits.read_fits_spectrum1d(os.path.expanduser(datfil))
+
+        elif len(hdulist) == 2: # NEW SCHOOL (one file per flux, error)
+            spec1d = spec_read_fits.read_fits_spectrum1d(os.path.expanduser(datfil), dispersion_unit='AA')
+            # Error array
+            sig = hdulist[1].data
+            spec1d.uncertainty = StdDevUncertainty(sig)
+            #
+            xspec1d = XSpectrum1D.from_spec1d(spec1d)
 
         else:  # ASSUMING MULTI-EXTENSION
             if len(hdulist) <= 2:
@@ -111,161 +139,83 @@ def readspec(specfil, inflg=None, efil=None, outfil=None, show_plot=0,
             fx = hdulist[0].data.flatten()
             sig = hdulist[1].data.flatten()
             wave = hdulist[2].data.flatten()
+            # BOSS/SDSS?
+            try:
+                multi_ivar = head0['TELESCOP'][0:4] in ['SDSS']
+            except KeyError:
+                pass
+            #
+            if multi_ivar is True:
+                tmpsig = np.zeros(len(sig))
+                gdp = np.where(sig > 0.)[0]
+                tmpsig[gdp] = np.sqrt(1./sig[gdp])
+                sig = tmpsig
+                wave = 10.**wave
     else:  # Should not be here
         print('spec.readwrite: Looks like an image')
         return dat
 
     # Generate, as needed
-    if 'spec1d' not in locals():
-        spec1d = Spectrum1D.from_array(wave, fx, uncertainty=StdDevUncertainty(sig))
+    if 'xspec1d' not in locals():
+        # Give Ang as default
+        if not hasattr(wave, 'unit'):
+            uwave = u.Quantity(wave, unit=u.AA)
+        else:
+            if wave.unit is None:
+                uwave = u.Quantity(wave, unit=u.AA)
+            else:
+                uwave = u.Quantity(wave)
+        xspec1d = XSpectrum1D.from_array(uwave, u.Quantity(fx),
+                                         uncertainty=StdDevUncertainty(sig))
 
-    # Generate Barak output
+    xspec1d.filename = specfil
+
+    # Continuum?
     try:
         co = fits.getdata(name+'_c.fits')
     except:
         try:
             npix = len(fx)
         except UnboundLocalError:
-            npix = len(spec1d.flux)
+            npix = len(xspec1d.flux)
         co = np.nan*np.ones(npix)
+
+    '''
+    # Generate a Barak Spectrum Class?
+    hd = hdulist[0].header
+    if use_barak is True:
+        # Barak
+        raise ValueError('Avoid!')
+        from barak import spec as bs
+        spec1d = bs.Spectrum(wa=wave, fl=fx, er=sig, co=co, filename=specfil)
+        spec1d.header = hd
+    '''
+
     # Plot?
     if show_plot:
             xpxg.plot_1d_arrays(wave,fx,sig,co)
 
-    # Generate a Spectrum Class
-    hd = hdulist[0].header
-    if use_barak is True:
-        # Barak
-        from barak import spec as bs
-        spec1d = bs.Spectrum(wa=wave, fl=fx, er=sig, co=co, filename=specfil)
-        spec1d.header = hd
-
-    # Write to disk?
+    # Write to disk? Unlikely
     if outfil != None:
         if use_barak is True:
             spec1d.fits_write(outfil,overwrite=True)
         else:
             xdb.set_trace() # Not ready
 
-    # Return 
-    return spec1d
-
-# ###########################################
-# ###########################################
-def old_readspec(specfil, inflg=None, efil=None, outfil=None, show_plot=0, verbose=False,
-                 use_barak=False):
-    ''' Deprecated already!
-    '''
-    from xastropy.spec import readwrite as rw
-    from xastropy.files import general as xfg
-    #from xastropy.plotting import x_guis as xpxg
-    from astropy.table import Table
-    from astropy.table import Column
-    from barak import spec as bs
-    #reload(bs)
-
-    # Initialize
-    dat = None
-    chk = None
-    if inflg == None:
-        inflg = 0
-
-    # Read header
-    datfil = xfg.chk_for_gz(specfil,chk=chk)
-    if chk == 0:
-        print('xastropy.spec.readwrite: File does not exist ', specfil)
-        return -1
-    hdulist = fits.open(os.path.expanduser(datfil))
-
-    ## #################
-    # Binary FITS table?
-    if hdulist[0].header['NAXIS'] == 0:
-        # Flux 
-        flux_tags = ['SPEC','FLUX','FLAM','FX']
-        fx = rw.get_table_column(flux_tags, hdulist)
-        if fx == None:
-            print('spec.readwrite: Binary FITS Table but no Flux tag')
-            return
-        # Error
-        sig_tags = ['ERROR','ERR','SIGMA_FLUX','FLAM_SIG']
-        sig = rw.get_table_column(sig_tags, hdulist)
-        if sig == None:
-            ivar_tags = ['IVAR']
-            if ivar == None:
-                print('spec.readwrite: Binary FITS Table but no error tags')
-                return
-            else: 
-                sig = fltarr(ivar.size)
-                gdi = np.where( ivar > 0.)
-                sig[gdi] = sqrt(1./strct.ivar[gdi])
-        # Wavelength
-        wave_tags = ['WAVE','WAVELENGTH','LAMBDA']
-        wave = rw.get_table_column(wave_tags, hdulist)
-        if wave == None:
-            print('spec.readwrite: Binary FITS Table but no wavelength tag')
-            return
-    elif hdulist[0].header['NAXIS'] == 1: # Data in the zero extension
-        # Look for wavelength info
-        if 'CRVAL1' in hdulist[0].header.keys():
-            # Flux
-            if 'BZERO' in hdulist[0].header:
-                bzero = hdulist[0].header['BZERO']
-                if verbose: print('readwrite: Subtracting off BZERO', bzero)
-            else: bzero = 0.
-            fx = hdulist[0].data.flatten() - bzero
-            # Wavelength
-            wave = rw.setwave(hdulist[0].header)
-            # Error
-            if efil == None:
-                ipos = max(specfil.find('F.fits'),specfil.find('f.fits'))
-                if ipos < 0: # No error array
-                    sig = np.zeros(fx.size)
-                else:
-                    if specfil.find('F.fits') > 0:
-                        efil = xfg.chk_for_gz(specfil[0:ipos]+'E.fits')
-                    else:
-                        efil = xfg.chk_for_gz(specfil[0:ipos]+'e.fits')
-            if efil != None:
-                sig=fits.getdata(os.path.expanduser(efil)) - bzero
-            #xpxg.plot_1d_arrays(sig)
-        else:  # ASSUMING MULTI-EXTENSION
-            if len(hdulist) <= 2:
-                print('spec.readwrite: No wavelength info but only 2 extensions!')
-                return
-            fx = hdulist[0].data.flatten()
-            sig = hdulist[1].data.flatten()
-            wave = hdulist[2].data.flatten()
-    else:  # Should not be here
-        print('spec.readwrite: Looks like an image')
-        return dat
-
-    # Generate Barak output
-    try:
-        co = fits.getdata(name+'_c.fits')
-    except:
-        co = np.nan*np.ones(len(fx))
-    # Plot?
-    if show_plot:
-            xpxg.plot_1d_arrays(wave,fx,sig,co)
-
-    # Generate a Spectrum Class
-    hd = hdulist[0].header
-    # Barak
-    sp = bs.Spectrum(wa=wave, fl=fx, er=sig, co=co, filename=specfil)
-    sp.header = hd
-
-    # Write to disk?
-    if outfil != None:
-        sp.fits_write(outfil,overwrite=True)
+    # Add in the header
+    xspec1d.head = head0
 
     # Return 
-    return sp
+    return xspec1d
+
 
 #### ###############################
 #### ###############################
 #  Set wavelength array using Header cards
 def setwave(hdr):
 
+    # DEPRECATED
+    xdb.set_trace()
     # Initialize
     SCL = 1.
     
@@ -278,28 +228,43 @@ def setwave(hdr):
     dcflag = hdr['DC-FLAG'] if 'DC-FLAG' in hdr else None
 
     # Generate
-    if dcflag == 1:
+    if (dcflag == 1) or (cdelt1 < 1e-4):
         wave = SCL * 10.**(crval1 + ( cdelt1 * np.arange(npix) + 1. - crpix1) ) # Log
+    xdb.set_trace()
 
     # Return
     return wave
 
 #### ###############################
 #### ###############################
-#  Grab values from the Binary FITS Table
+#  Grab values from the Binary FITS Table or Table
 def get_table_column(tags, hdulist):
     dat = None
     ii = 0
-    #pdb.set_trace()
+    # Use Table
+    if type(hdulist[1]) is BinTableHDU:
+        tab = Table(hdulist[1].data)
+    else:
+        tab = hdulist[1]
+
+    # Grab
+    for tag in tags:
+        if tag in tab.dtype.names: 
+            dat = tab[tag]
+            break  # Break with first hit
+
+    '''
+    For BinTableHDU (deprecated)
     while(ii < len(tags)):
         if tags[ii] in hdulist[1].columns.names: 
             dat = hdulist[1].data[tags[ii]]
             break  # Break with first hit
         else:
             ii = ii + 1
+    '''
     # Return
-    if dat != None:
-        return dat.flatten(), tags[ii]
+    if dat is not None:
+        return dat.flatten(), tag
     else: 
         return dat, 'NONE'
 
@@ -320,13 +285,16 @@ if __name__ == '__main__':
     # Standard log-linear read (MagE)
     if (flg_test % 2**1) >= 2**0:
         fil = '~/PROGETTI/LLSZ3/data/normalize/UM669_nF.fits'
+        #fil = '/Users/xavier/Dropbox/QSOPairs/data/MAGE_redux/SDSSJ085357.49-001106.1_F.fits.gz'
         #efil = '~ers/xavier/PROGETTI/LLSZ3/data/normalize/UM669_nE.fits'
         myspec = readspec(fil)
-        xdb.xplot(myspec.dispersion, myspec.flux, myspec.uncertainty.array)
+        #xdb.xplot(myspec.dispersion, myspec.flux)
+        myspec.plot()
+        #xdb.xplot(myspec.dispersion, myspec.flux, myspec.uncertainty.array)
 
     # LowRedux
     if (flg_test % 2**2) >= 2**1:
-        fil = '/Users/xavier/Dropbox/QSOPairs/data/LRIS_redux/SDSSJ234704.25+150146.4_F.fits'
+        fil = '/Users/xavier/Dropbox/QSOPairs/data/LRIS_redux/SDSSJ231254.65-025403.1_b400_F.fits.gz'
         myspec = readspec(fil)
         xdb.xplot(myspec.dispersion, myspec.flux, myspec.uncertainty.array)
         #xdb.set_trace()

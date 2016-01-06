@@ -13,34 +13,46 @@
 
 from __future__ import print_function, absolute_import, division, unicode_literals
 
-import os, copy, sys
+import os, copy, sys, imp, glob
 import numpy as np
-import yaml
+import yaml, time
 
 from astropy import units as u
 from astropy.io import ascii 
 
-from xastropy.igm.abs_sys.abssys_utils import Absline_System, Abs_Sub_System
-from xastropy.igm.abs_sys.abs_survey import Absline_Survey
-from xastropy.igm.abs_sys.ionic_clm import Ionic_Clm_File, Ions_Clm
+from linetools.lists.linelist import LineList
+
+from xastropy.igm.abs_sys.abs_survey import AbslineSurvey
+from xastropy.igm.abs_sys.abssys_utils import AbslineSystem, Abs_Sub_System
+from xastropy.igm.abs_sys.ionclms import Ionic_Clm_File, IonClms
 from xastropy.spec import abs_line, voigt
 from xastropy.atomic import ionization as xatomi
 from xastropy.xutils import xdebug as xdb
 
-#class LLS_System(Absline_System):
+xa_path = imp.find_module('xastropy')[1]
+
+#class LLSSystem(AbslineSystem):
 #class LLS_Survey(Absline_Survey):
 
 # Class for LLS Absorption Lines 
-class LLS_System(Absline_System):
+class LLSSystem(AbslineSystem):
     """An LLS absorption system
 
     Attributes:
         tau_ll: Opacity at the Lyman limit
     """
-    # Initialize with a .dat file
-    def __init__(self, dat_file=None, tree=None):
+    # Create instance with a AbsID file
+    @classmethod
+    def from_absid_fil(cls, abs_fil):
+        lls = cls() # Empty
+        # Parse abs_fil
+        lls.parse_absid_file(abs_fil)
+        # Return
+        return lls
+
+    def __init__(self, dat_file=None, tree=None, **kwargs):
         # Generate with type
-        Absline_System.__init__(self,'LLS')
+        AbslineSystem.__init__(self,'LLS', **kwargs)
         # Over-ride tree?
         if tree != None:
             self.tree = tree
@@ -56,16 +68,33 @@ class LLS_System(Absline_System):
         self.ions = None
         self.zpeak = None
 
-        # Name
+
+    # Modify standard dat parsing
+    def mk_subsys(self,nsub):
+        '''Generate subsystems from Parent
+        Parameters:
+        ----------
+        nsub: int
+          Number to generate
+        '''
+        lbls= map(chr, range(65, 91))
+        self.nsub = nsub
+        self.subsys = {}
+        for i in range(self.nsub):
+            self.subsys[lbls[i]] = Abs_Sub_System('LLS')
+            self.subsys[lbls[i]].name = self.name+lbls[i]
+            self.subsys[lbls[i]].coord = self.coord
+            self.subsys[lbls[i]].zem = self.zem
+            self.subsys[lbls[i]].linelist = self.linelist
 
     # Modify standard dat parsing
     def parse_dat_file(self,dat_file):
         # Standard Call
-        out_list = Absline_System.parse_dat_file(self,dat_file,flg_out=1)
+        out_list = AbslineSystem.parse_dat_file(self,dat_file,flg_out=1)
 
         # LLS keys
-        self.qso = self.datdict['QSO name']
-        self.zqso = float(self.datdict['QSO zem'])
+        self.bgsrc = self.datdict['QSO name']
+        self.zem = float(self.datdict['QSO zem'])  # Was zqso
         self.MH = float(self.datdict['[M/H] ave'])
         self.nsub = int(self.datdict['N subsys'])
         self.cldyfil = self.datdict['Cloudy Grid File']
@@ -88,9 +117,10 @@ class LLS_System(Absline_System):
             for i in range(self.nsub):
                 # Generate
                 self.subsys[lbls[i]] = Abs_Sub_System('LLS')
-                self.subsys[lbls[i]].name = self.name
+                self.subsys[lbls[i]].name = self.name+lbls[i]
                 self.subsys[lbls[i]].coord = self.coord
                 self.subsys[lbls[i]].tree = self.tree
+                self.subsys[lbls[i]].linelist = self.linelist
                 # Fill in
                 for ii,key in enumerate(keys):
                     try:
@@ -102,40 +132,62 @@ class LLS_System(Absline_System):
                         val = null_dict[key]
                         #pdb.set_trace()
                         if val.__class__ == np.ndarray:  
-                            setattr(self.subsys[lbls[i]], att[ii], np.array(map(float,tmpc.split())) )
+                            setattr(self.subsys[lbls[i]], att[ii],
+                                    np.array(map(float,tmpc.split())) )
                         else: # Single value
                             setattr(self.subsys[lbls[i]], att[ii], (map(type(val),[tmpc]))[0] )
 
     # Fill up the ions
-    def get_ions(self):
-        """
-        Parse the ions for each Subsystem
+    def get_ions(self, idict=None, closest=False):
+        """Parse the ions for each Subsystem
         And put them together for the full system
-
         Fills .ions with a Ions_Clm Class
+
+        Parameters:
+        -----------
+        closest : bool, optional
+          Take the closest line to input wavelength? [False]
+        idict : dict, optional
+          dict containing the IonClms info
         """
-        # Subsystems
-        lbls= map(chr, range(65, 91))
-        for ii in range(self.nsub):
-            clm_fil = self.tree+self.subsys[lbls[ii]].clm_file
-            # Parse .clm and .all files
-            self.subsys[lbls[ii]].clm_analy = Ionic_Clm_File(clm_fil)
-            ion_fil = self.tree+self.subsys[lbls[ii]].clm_analy.ion_fil 
-            all_fil = ion_fil.split('.ion')[0]+'.all'
-            self.subsys[lbls[ii]].ions = Ions_Clm(all_fil, trans_file=ion_fil)
-
-        # Combine
-        if self.nsub == 1:
-            self.ions = self.subsys['A'].ions
-            self.clm_analy = self.subsys['A'].clm_analy
-            #xdb.set_trace()
-        elif self.nsub == 0:
-            raise ValueError('lls_utils.fill_ions: Cannot have 0 subsystems..')
+        if idict is not None:
+            # Not setup for SubSystems
+            self._ionclms = IonClms(idict=idict)
         else:
-            self.ions = self.subsys['A'].ions
-            self.clm_analy = self.subsys['A'].clm_analy
-            print('lls_utils.fill_ions: Need to update multiple subsystems!! Taking A.')
+            # Subsystems
+            if self.nsub > 0:  # This speeds things up (but is rarely used)
+                if self.linelist is None:
+                    self.linelist = LineList('ISM')
+            lbls= map(chr, range(65, 91))
+            for ii in range(self.nsub):
+                clm_fil = self.tree+self.subsys[lbls[ii]].clm_file
+                # Parse .clm and .all files
+                self.subsys[lbls[ii]].clm_analy = Ionic_Clm_File(clm_fil)
+                ion_fil = self.tree+self.subsys[lbls[ii]].clm_analy.ion_fil 
+                all_fil = ion_fil.split('.ion')[0]+'.all'
+                self.all_fil=all_fil #MF: useful to have
+                self.subsys[lbls[ii]]._ionclms = IonClms(all_fil)
+                # Linelist (for speed)
+                if self.subsys[lbls[ii]].linelist is None:
+                    self.subsys[lbls[ii]].linelist = self.linelist
+                self.subsys[lbls[ii]].linelist.closest = closest
+                # Parse .ion file
+                self.subsys[lbls[ii]].read_ion_file(ion_fil)
 
+            # Combine
+            if self.nsub == 1:
+                self._ionclms = self.subsys['A']._ionclms
+                self.clm_analy = self.subsys['A'].clm_analy
+                self.lines = self.subsys['A'].lines
+                #xdb.set_trace()
+            elif self.nsub == 0:
+                raise ValueError('lls_utils.get_ions: Cannot have 0 subsystems..')
+            else:
+                self._ionclms = self.subsys['A']._ionclms
+                self.clm_analy = self.subsys['A'].clm_analy
+                self.lines = self.subsys['A'].lines
+                print('lls_utils.get_ions: Need to update multiple subsystems!! Taking A.')
+                
 
     # #############
     def fill_lls_lines(self, bval=20.):
@@ -152,7 +204,7 @@ class LLS_System(Absline_System):
         atom = ba.readatom()
         self.lls_lines = []
         for line in atom['HI']:
-            tmp = abs_line.Abs_Line(line['wa'],fill=False)
+            tmp = abs_line.Abs_Line(line['wa']*u.AA,fill=False)
             # Atomic data
             tmp.atomic = {'fval': line['osc'], 'gamma': line['gam'],
                           'name': 'HI %s' % line['wa'], 'wrest': line['wa']}
@@ -183,7 +235,7 @@ class LLS_System(Absline_System):
         # LLS first
 
         # Energies in LLS rest-frame
-        wv_rest = spec.dispersion * u.AA / (self.zabs+1)
+        wv_rest = spec.dispersion / (self.zabs+1)
         energy = wv_rest.to(u.eV, equivalencies=u.spectral())
 
         # Get photo_cross and calcualte tau
@@ -223,7 +275,7 @@ class LLS_System(Absline_System):
         ''' Measure zpeak from an ionic transition
         '''
         if self.ions is None:
-            print('get_zpeak: Need to fill ions with fill_ions first.')
+            print('get_zpeak: Need to fill ions with get_ions first.')
             return
 
         # Ions for analysis
@@ -288,10 +340,10 @@ class LLS_System(Absline_System):
 
     # Output
     def __repr__(self):
-        return ('[{:s}: {:s} {:s}, {:g}, NHI={:g}, tau={:g}, M/H={:g}]'.format(
+        return ('[{:s}: {:s} {:s}, z={:g}, NHI={:g}, tau={:g}, [M/H]={:g} dex]'.format(
                 self.__class__.__name__,
                  self.coord.ra.to_string(unit=u.hour,sep=':',pad=True),
-                 self.coord.dec.to_string(sep=':',pad=True),
+                 self.coord.dec.to_string(sep=':',pad=True,alwayssign=True),
                  self.zabs, self.NHI, self.tau_LL, self.MH))
 
     def print_abs_type(self):
@@ -302,16 +354,16 @@ class LLS_System(Absline_System):
 # #######################################################################
 # #######################################################################
 # Class for LLS Survey
-class LLS_Survey(Absline_Survey):
+class LLSSurvey(AbslineSurvey):
     """An LLS Survey class
 
     Attributes:
         
     """
     # Initialize with a .dat file
-    def __init__(self, dat_file, tree=None):
+    def __init__(self, **kwargs): 
         # Generate with type
-        Absline_Survey.__init__(self,dat_file,abs_type='LLS', tree=tree)
+        AbslineSurvey.__init__(self, 'LLS', **kwargs)
 
     # Cut on NHI
     def cut_nhi_quality(self, sig_cut=0.4):
@@ -339,9 +391,10 @@ class LLS_Survey(Absline_Survey):
         # Return
         return gdNHI, bdNHI
 
-    # Default sample of LLS (high-z)
+    # Default sample of LLS (HD-LLS, DR1)
     @classmethod
     def default_sample(cls):
+        '''
         # Local
         sys.path.append(os.path.abspath(os.environ.get('LLSPAP')+
                                         "/Optical/Data/Analysis/py"))
@@ -354,16 +407,51 @@ class LLS_Survey(Absline_Survey):
 
         # Return
         return lls
+        '''
+        import urllib2
+        # Pull from Internet (as necessary)
+        summ_fil = glob.glob(xa_path+"/data/LLS/HD-LLS_DR1.fits")
+        if len(summ_fil) > 0:
+            summ_fil = summ_fil[0]
+        else:
+            url = 'http://www.ucolick.org/~xavier/HD-LLS/DR1/HD-LLS_DR1.fits'
+            print('LLSSurvey: Grabbing summary file from {:s}'.format(url))
+            f = urllib2.urlopen(url)
+            summ_fil = xa_path+"/data/LLS/HD-LLS_DR1.fits"
+            with open(summ_fil, "wb") as code:
+                code.write(f.read())
+
+        # Ions
+        ions_fil = glob.glob(xa_path+"/data/LLS/HD-LLS_ions.json")
+        if len(ions_fil) > 0:
+            ions_fil = ions_fil[0]
+        else:
+            url = 'http://www.ucolick.org/~xavier/HD-LLS/DR1/HD-LLS_ions.json'
+            print('LLSSurvey: Grabbing JSON ion file from {:s}'.format(url))
+            f = urllib2.urlopen(url)
+            ions_fil = xa_path+"/data/LLS/HD-LLS_ions.json"
+            with open(ions_fil, "wb") as code:
+                code.write(f.read())
+
+        # Read
+        lls = cls(summ_fits=summ_fil)
+        lls.fill_ions(jfile=ions_fil)
+
+        return lls
 
 
 
-
-
-
-
-
-
-
+#
+def profile_read():
+    '''
+    Bit for profiling the main read commands
+    '''
+    # Tree
+    lls = LLS_Survey('Lists/lls_metals.lst', tree=os.getenv('LLSTREE'))
+    # Mask
+    # Ions
+    lls.fill_ions()
+    return lls
 
 
 ## #################################    
@@ -377,9 +465,11 @@ if __name__ == '__main__':
     #flg_test += 2 # LLS plot
     #flg_test += 2**2 # zpeak
     #flg_test += 2**3 # output .dat file
+    #flg_test += 2**4 # read/write AbsID
     #
     #flg_test += 2**9 # LLS Survey NHI
-    flg_test += 2**10 # LLS Survey ions
+    #flg_test += 2**10 # LLS Survey ions
+    flg_test += 2**11 # Profiling the main read commands
 
     # Test Absorption System
     print('-------------------------')
@@ -390,7 +480,7 @@ if __name__ == '__main__':
     # Test ions
     if (flg_test % 2**1) >= 2**0:
         print('-------------------------')
-        tmp1.fill_ions()
+        tmp1.get_ions()
         print('C IV: ')
         print(tmp1.ions[(6,4)])
         print(tmp1.ions.trans[5]) # CIV 1550
@@ -418,30 +508,40 @@ if __name__ == '__main__':
     # Write .dat
     if (flg_test % 2**4) >= 2**3:
         tmp1.write_dat_file()
-        '''
-        with open('tmp.yml', 'w') as outfile:
-            outfile.write( yaml.safe_dump(tmp1.datdic, default_flow_style=False))
-        dd = {'A':'a', 'B':{'C':'c', 'D':'d', 'E':'e'}}
-        with open('result.yml', 'w') as yaml_file:
-            yaml_file.write( yaml.safe_dump(dd, default_flow_style=False))
+
+    # Read and Write AbsID
+    if (flg_test % 2**5) >= 2**4:
+        abs_fil = '/Users/xavier/paper/LLS/Optical/Data/Analysis/MAGE/SDSSJ1004+0018_z2.746_id.fits'
+        lls = LLSSystem.from_absid_fil(abs_fil)
+        tmpfil= '/Users/xavier/Desktop/tmp.fits'
         xdb.set_trace()
-        '''
+        lls.write_absid_file(tmpfil)
+        lls = LLSSystem.from_absid_fil(tmpfil)
+        xdb.set_trace()
 
     # #############################
     # LLS Survey
     if (flg_test % 2**10) >= 2**9:
         print('-------------------------')
-        lls = LLS_Survey('Lists/lls_metals.lst', tree=os.environ.get('LLSTREE'))
+        lls = LLSSurvey('Lists/lls_metals.lst', tree=os.environ.get('LLSTREE'))
         xdb.xhist(lls.NHI, binsz=0.30)
 
     # LLS Survey ions
     if (flg_test % 2**11) >= 2**10:
-        lls = LLS_Survey('Lists/lls_metals.lst', tree=os.environ.get('LLSTREE'))
+        lls = LLSSurvey('Lists/lls_metals.lst', tree=os.environ.get('LLSTREE'))
         lls.fill_ions()
         xdb.xhist(lls.ions((6,4),skip_null=True)['clm'], binsz=0.3,
                   xlabel=r'$\log_{10} N({\rm C}^{+3})$')
         xdb.xhist(lls.ions((14,2),skip_null=True)['clm'], binsz=0.3,
                   xlabel=r'$\log_{10} N({\rm Si}^{+})$')
+
+    # Profiling the Read
+    if (flg_test % 2**12) >= 2**11:
+        # python -m cProfile -o lls_profile.dat lls_utils.py
+        t0 = time.clock()
+        lls = profile_read()
+        t1 = time.clock()
+        print('Total time = {:g}'.format(t1-t0))
 
     # All done
     print('-------------------------')
